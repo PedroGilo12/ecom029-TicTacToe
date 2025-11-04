@@ -2,13 +2,16 @@ import socket
 import threading
 import time
 
+import json
+
 HOST = '0.0.0.0'
 PORT = 5000
 
 board = [' ' for _ in range(9)]
 clients = []
-symbols = ['X', 'O']
+symbols = ['❌', '⭕']
 turn = 0
+variables = {"started": False, "status": "", "symbol": "", "turn": "", "board": board}
 lock = threading.Lock()
 game_over = False
 
@@ -41,69 +44,111 @@ def broadcast(msg):
         except:
             pass
 
-def handle_client(conn, symbol, player_id):
-    global turn, game_over
-    conn.sendall(f"Você é o jogador '{symbol}'. Aguarde o início da partida...\n".encode())
+reiniciar_jogo = False
 
-    # Espera os dois conectarem (com pequeno sleep para evitar busy-wait)
+def handle_client(conn, symbol, player_id):
+    global turn, game_over, variables
+    variables["status"] = f"Você é o jogador '{symbol}'.\nAguarde o início da partida...\n"
+    variables["symbol"] = symbol
+    conn.sendall(json.dumps(variables).encode())
+
     while len(clients) < 2:
         time.sleep(0.1)
 
-    # Envia o estado inicial do tabuleiro apenas uma vez (pelo jogador 0)
     if player_id == 0:
         with lock:
-            broadcast(f"\n{print_board()}\nVez do jogador '{symbols[turn]}'\n")
+    
+            variables["started"] = True
+            variables["status"] = f"Partida iniciada! Vez do jogador '{symbols[turn]}'\n"
+            variables["turn"] = symbols[turn]
+            broadcast(json.dumps(variables))
 
-    # Loop principal do jogo
-    while not game_over:
+    end_game = False
+    while not end_game:
         with lock:
             winner = check_winner()
             if winner:
-                game_over = True
+                end_game = True
                 if winner == 'Empate' or winner == 'Draw':
-                    broadcast(f"\n{print_board()}\nEmpate!\n")
+                    variables["status"] = "Empate! (Q)uit"
+                    broadcast(json.dumps(variables))
                 else:
-                    broadcast(f"\n{print_board()}\nJogador '{winner}' venceu!\n")
+                    variables["status"] = f"Jogador '{winner}' venceu! (Q)uit"
+                    broadcast(json.dumps(variables))
                 break
 
             current_symbol = symbols[turn]
             current_conn = clients[turn]
 
-            # Somente o thread do jogador atual deve solicitar a jogada
+    
             if conn == current_conn:
-                # Envia apenas ao jogador atual que é a sua vez
-                conn.sendall("É seu turno. Digite uma posição (1-9): ".encode())
+        
                 try:
                     move = conn.recv(1024).decode().strip()
                 except:
-                    game_over = True
+                    end_game = True
                     break
 
                 if not move.isdigit() or not (1 <= int(move) <= 9):
-                    conn.sendall("Movimento inválido. Use 1-9.\n".encode())
                     continue
-
                 move = int(move) - 1
                 if board[move] != ' ':
-                    conn.sendall("Posição já ocupada.\n".encode())
                     continue
 
-                # Atualiza o tabuleiro e troca o turno
+        
                 board[move] = symbol
                 turn = 1 - turn
 
-                # Após a jogada, notifica todos os clientes UMA VEZ com o novo tabuleiro
-                broadcast(f"\n{print_board()}\nVez do jogador '{symbols[turn]}'\n")
+        
+                variables["board"] = board
+                variables["turn"] = symbols[turn]
+                variables["status"] = f"[bold yellow]Vez do jogador {variables["turn"]}[/bold yellow] — Use mouse ou Enter"
+                broadcast(json.dumps(variables))
 
             else:
-                # Se não for a vez deste cliente, envia apenas uma mensagem leve e espera
+        
                 try:
-                    conn.sendall(f"Aguarde sua vez. É a vez do jogador '{current_symbol}'.\n".encode())
+                    variables["board"] = board
+                    variables["turn"] = symbols[turn]
+                    variables["status"] = f"Vez do jogador '{symbols[turn]}'\n"
+                    broadcast(json.dumps(variables))
                 except:
                     pass
 
-        # Pequeno sono fora do lock para reduzir uso de CPU
+
         time.sleep(0.05)
+
+    time.sleep(5)
+    game_over = True
+    
+    while True:
+        global reiniciar_jogo
+        with lock:
+    
+            if reiniciar_jogo:
+                break
+
+            try:
+                move = conn.recv(1024).decode().strip()
+            except:
+                break
+
+            if move == '10':
+                print("Reiniciando o jogo...")
+                reiniciar_jogo = True
+                game_over = True
+                variables = {
+                    "started": False,
+                    "status": "",
+                    "symbol": "",
+                    "turn": "",
+                    "board": [' ' for _ in range(9)]
+                }
+                broadcast(json.dumps(variables))
+                break
+
+        time.sleep(0.05)
+
 
 def start_server():
     global clients
@@ -119,7 +164,6 @@ def start_server():
         player_id = len(clients) - 1
         threading.Thread(target=handle_client, args=(conn, symbols[player_id], player_id), daemon=True).start()
 
-    # Mantém o servidor ativo até o jogo terminar
     while not game_over:
         pass
 

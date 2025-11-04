@@ -1,10 +1,18 @@
 from textual.app import App, ComposeResult
-from textual.widgets import Static, Header, Button
+from textual.widgets import Static, Header, Button, Input, Label
 from textual.containers import Grid, Container
 from textual.reactive import reactive
 from textual.screen import Screen
 from rich.text import Text
+import socket
+import threading
+import json
 
+import subprocess
+
+variables = {"started": False, "status": "", "symbol": "", "turn": "", "board": [' ' for _ in range(9)]}
+sock = None
+lock = threading.Lock()
 
 class Cell(Static):
     value = reactive(" ")
@@ -24,11 +32,11 @@ class Cell(Static):
         texto = self.value.center(3, " ") if self.value.strip() else "   "
         return Text(texto, style=f"bold {color}", justify="center")
 
-    def on_click(self, event) -> None:
+    def on_click(self, event):
         if hasattr(self.screen, "jogar"):
             self.screen.jogar(self.row, self.col)
 
-    def on_key(self, event) -> None:
+    def on_key(self, event):
         if event.key == "enter":
             if hasattr(self.screen, "jogar"):
                 self.screen.jogar(self.row, self.col)
@@ -38,30 +46,97 @@ class TelaInicial(Screen):
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         with Container(id="inicio-container"):
-            yield Static("Jogo da Velha\n[dim](Textual Edition)[/dim]", id="titulo")
+            yield Static("Jogo da Velha\n[dim](Caio Oliveira, Pedro Giló, Matheus Pedro)[/dim]", id="titulo")
+            yield Label("IP do Servidor:")
+            yield Input(placeholder="localhost", id="ip_servidor")
+            yield Label("Porta:")
+            yield Input(placeholder="5000", id="porta_servidor")
+            yield Static(id="inicio-status")
             yield Button("Iniciar Novo Jogo", id="iniciar", variant="primary")
 
-    def on_mount(self) -> None:
+    def on_mount(self):
+        self.styles.align_horizontal = "center"
+        self.styles.align_vertical = "middle"
         container = self.query_one("#inicio-container")
         container.styles.align = ("center", "middle")
         container.styles.justify = "center"
-        container.styles.height = "100%"
-        container.styles.width = "100%"
+        container.styles.height = "auto"
+        container.styles.width = 100
         container.styles.padding = (0, 1)
-
+        container.styles.max_width = 50
+        container.styles.border = ("round", "dimgray")
         titulo = self.query_one("#titulo")
         titulo.styles.text_align = "center"
-        titulo.styles.width = "auto" # <-- CORRIGIDO
+        titulo.styles.width = "auto"
         titulo.styles.margin = (0, 0, 1, 0)
+        for label in self.query(Label):
+            label.styles.margin = (1, 0, 0, 0)
+            label.styles.width = "100%"
+        for input_widget in self.query(Input):
+            input_widget.styles.width = "100%"
+        status = self.query_one("#inicio-status", Static)
+        status.styles.height = 3
+        status.styles.text_align = "center"
+        status.styles.color = "red"
+        status.styles.margin_top = 1
+        self.query_one(Button).styles.margin_top = 1
 
-    def on_button_pressed(self, event: Button.Pressed) -> None:
+    def receive_messages(self, sock):
+        global variables
+        status = self.query_one("#inicio-status", Static)
+        while True:
+            try:
+                msg = sock.recv(2048).decode()
+                if not msg:
+                    status.update("[bold red]Conexão encerrada pelo servidor.[/bold red]")
+                    break
+                variables = json.loads(msg)
+                status.update("[bold green]" + variables["status"] + "[/bold green]")
+                if variables["started"]:
+                    self.app.call_from_thread(self.app.push_screen, "jogo")
+                    break
+            except:
+                status.update("[bold red]Erro de conexão.[/bold red]")
+                break
+
+    def on_button_pressed(self, event):
+        global sock
         if event.button.id == "iniciar":
-            self.app.push_screen("jogo")
+            status = self.query_one("#inicio-status", Static)
+            ip_input = self.query_one("#ip_servidor", Input)
+            porta_input = self.query_one("#porta_servidor", Input)
+            self.app.ip_servidor = ip_input.value.strip() or ip_input.placeholder
+            porta_str = porta_input.value.strip() or porta_input.placeholder
+            try:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.connect((self.app.ip_servidor, int(porta_str)))
+                threading.Thread(target=self.receive_messages, args=(sock,), daemon=True).start()
+            except ValueError:
+                status.update("[bold red]Porta inválida![/bold red]")
 
 
 class TelaJogo(Screen):
     jogador_atual = reactive("❌")
     terminou = reactive(False)
+
+    def receive_messages(self, sock):
+        global variables
+        while True:
+            try:
+                msg = sock.recv(2048).decode()
+                if not msg:
+                    self.update_status("[bold red]Conexão encerrada pelo servidor.[/bold red]")
+                    break
+                variables = json.loads(msg)
+                self.update_status(variables["status"])
+                for i, cell in enumerate(self.query(Cell)):
+                    cell.value = variables["board"][i]
+                if not variables["started"]:
+                    self.app.call_from_thread(self.app.push_screen, "inicio")
+                    break
+            except:
+                self.update_status("[bold red]Erro de conexão.[/bold red]")
+                break
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -72,13 +147,13 @@ class TelaJogo(Screen):
                         yield Cell(i, j)
             yield Static("", id="status")
 
-    def on_mount(self) -> None:
+    def on_mount(self):
+        global sock, variables
         jogo_container = self.query_one("#jogo-container")
         jogo_container.styles.align = ("center", "middle")
         jogo_container.styles.justify = "center"
         jogo_container.styles.height = "100%"
         jogo_container.styles.width = "100%"
-
         grid = self.query_one("#tabuleiro")
         grid.styles.width = 30
         grid.styles.height = 15
@@ -87,106 +162,49 @@ class TelaJogo(Screen):
         grid.styles.gap = 0
         grid.styles.border = ("round", "ansi_bright_cyan")
         grid.styles.background = "black"
-
         for cell in self.query(Cell):
             cell.styles.border = ("solid", "gray")
-
         self.status = self.query_one("#status", Static)
         self.status.styles.margin = (1, 0, 0, 0)
-        self.status.styles.width = 30 # <-- CORRIGIDO
+        self.status.styles.width = 30
         self.status.styles.text_align = "center"
-        self.update_status(f"[bold yellow]Vez do jogador {self.jogador_atual}[/bold yellow] — Use mouse ou Enter")
+        threading.Thread(target=self.receive_messages, args=(sock,), daemon=True).start()
+        self.update_status(f"[bold yellow]Vez do jogador {variables['turn']}[/bold yellow] — Use mouse ou Enter")
 
-    def update_status(self, msg: str) -> None:
+    def update_status(self, msg):
         self.status.update(msg)
 
-    def jogar(self, row: int, col: int) -> None:
-        if self.terminou:
-            return
-        cell = self.query_one(f"#cell-{row}-{col}", Cell)
-        if cell.value != " ":
-            return
-        cell.value = self.jogador_atual
+    def jogar(self, row, col):
+        msg = f"{row*3 + col + 1}"
+        with lock:
+            sock.sendall(msg.encode())
 
-        vencedor = self.verificar_vencedor()
-        if vencedor:
-            self.terminou = True
-            self.destacar_vitoria(vencedor)
-            self.update_status(f"🎉 [bold green]Jogador {vencedor} venceu![/bold green] (R)einiciar (Q)uit")
-            return
-        elif all(c.value != " " for c in self.query(Cell)):
-            self.terminou = True
-            self.update_status("😐 Empate! (R)einiciar (Q)uit")
-            return
-
-        self.jogador_atual = "⭕" if self.jogador_atual == "❌" else "❌"
-        self.update_status(f"[bold yellow]Vez do jogador {self.jogador_atual}[/bold yellow] — Use mouse ou Enter")
-
-    def verificar_vencedor(self):
-        t = [[self.query_one(f"#cell-{i}-{j}", Cell).value for j in range(3)] for i in range(3)]
-        for i in range(3):
-            if t[i][0] != " " and t[i][0] == t[i][1] == t[i][2]:
-                return t[i][0]
-        for j in range(3):
-            if t[0][j] != " " and t[0][j] == t[1][j] == t[2][j]:
-                return t[0][j]
-        if t[0][0] != " " and t[0][0] == t[1][1] == t[2][2]:
-            return t[0][0]
-        if t[0][2] != " " and t[0][2] == t[1][1] == t[2][0]:
-            return t[0][2]
-        return None
-
-    def destacar_vitoria(self, vencedor: str) -> None:
-        t = [[self.query_one(f"#cell-{i}-{j}", Cell).value for j in range(3)] for i in range(3)]
-        linhas = (
-            [(i, 0, i, 1, i, 2) for i in range(3)]
-            + [(0, j, 1, j, 2, j) for j in range(3)]
-            + [(0, 0, 1, 1, 2, 2), (0, 2, 1, 1, 2, 0)]
-        )
-        for coords in linhas:
-            a = [t[coords[k]][coords[k + 1]] for k in range(0, 6, 2)]
-            if a.count(vencedor) == 3:
-                for k in range(0, 6, 2):
-                    c = self.query_one(f"#cell-{coords[k]}-{coords[k + 1]}", Cell)
-                    c.styles.border = ("round", "green")
-
-    def on_key(self, event) -> None:
+    def on_key(self, event):
         key = getattr(event, "key", "")
         if not key:
             return
-        if key.lower() == "r":
-            self.reiniciar()
-
-    def reiniciar(self) -> None:
-        for cell in self.query(Cell):
-            cell.value = " "
-            cell.styles.border = ("solid", "gray")
-        self.jogador_atual = "❌"
-        self.terminou = False
-        self.update_status(f"[bold yellow]Novo jogo iniciado![/bold yellow] — Use mouse ou Enter")
-
 
 class JogoDaVelhaApp(App):
-    SCREENS = {
-        "inicio": TelaInicial,
-        "jogo": TelaJogo,
-    }
-    BINDINGS = [
-        ("q", "request_quit", "Sair/Voltar"),
-    ]
+    SCREENS = {"inicio": TelaInicial, "jogo": TelaJogo}
+    BINDINGS = [("q", "request_quit", "Sair/Voltar")]
+    ip_servidor = reactive("127.0.0.1")
+    porta_servidor = reactive(12345)
 
-    def on_mount(self) -> None:
+    def on_mount(self):
         self.push_screen("inicio")
 
-    def action_request_quit(self) -> None:
-        if self.screen.id == "inicio": # Corrigido de _default para inicio
-             self.exit()
+    def action_request_quit(self):
+        if self.screen.id == "inicio":
+            self.exit()
         elif self.screen.id == "jogo":
-             self.pop_screen()
+            self.pop_screen()
         else:
-             self.exit()
+            self.exit()
 
+
+def rodar_outro():
+    subprocess.run(["python", "server.py"])   
 
 if __name__ == "__main__":
+    threading.Thread(target=rodar_outro, daemon=True).start()
     JogoDaVelhaApp().run()
-
